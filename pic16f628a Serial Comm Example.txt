@@ -1,0 +1,221 @@
+
+
+;------------------------------------------------------------------------------
+; PROCESSOR DECLARATION
+;------------------------------------------------------------------------------
+
+     LIST      p=16F88              ; list directive to define processor
+     #INCLUDE <p16f88.inc>          ; processor specific variable definitions
+
+;------------------------------------------------------------------------------
+;
+; CONFIGURATION WORD SETUP
+;
+; The 'CONFIG' directive is used to embed the configuration word within the 
+; .asm file. The lables following the directive are located in the respective 
+; .inc file.  See the data sheet for additional information on configuration 
+; word settings.
+;
+;------------------------------------------------------------------------------
+; ~~~~~~~~~~~~~~~ _CONFIG1 ~~~~~~~~~~~~~~~~~
+  ; turns off everything except MCLR and Powerup Timer
+     __CONFIG    _CONFIG1, _CPD_OFF & _CP_OFF & _DEBUG_OFF & _LVP_OFF & _MCLR_ON & _PWRTE_ON & _WDT_OFF & _WRT_PROTECT_OFF & _INTRC_IO & _BODEN_OFF
+ 	 __CONFIG    _CONFIG2, _IESO_OFF & _FCMEN_OFF & _HS_OSC
+ ; --------The Internal RC Frequency can be set at any time after ORG -----------------------
+ ;
+ ;  Register Usage
+  CBLOCK 0x20    ;  Start Registers at End of the Values
+ d1                ;  Delay counters
+ d2  
+ d3
+ 
+  ENDC
+
+CBLOCK 0x20             ; Declare variable addresses starting at 0x20 
+          dataL 
+        ENDC
+; Example of using Shared Uninitialized Data Section
+INT_VAR        UDATA_SHR       
+W_TEMP         RES        1    ; w register for context saving (ACCESS)
+STATUS_TEMP    RES        1    ; status used for context saving (ACCESS)
+PCLATH_TEMP    RES        1    ; variable used for context saving
+
+; Example of using GPR Uninitialized Data
+GPR_VAR        UDATA           
+count1         RES        1    ; User variable placed by linker
+count2         RES        1    ; User variable placed by linker
+count3         RES        1    ; User variable placed by linker
+count4         RES        1    ; User variable placed by linker
+
+;------------------------------------------------------------------------------
+; EEPROM INITIALIZATION
+;
+; The 16F88 has 256 bytes of non-volatile EEPROM, starting at address 0x2100
+; 
+;------------------------------------------------------------------------------
+
+DATAEE    CODE  0x2100
+    DE    "MCHP"          ; Place 'M' 'C' 'H' 'P' at address 0,1,2,3
+
+;------------------------------------------------------------------------------
+; RESET VECTOR
+;------------------------------------------------------------------------------
+
+RESET     CODE    0x0000            ; processor reset vector
+          pagesel START
+          GOTO    START             ; go to beginning of program
+
+;------------------------------------------------------------------------------
+; INTERRUPT SERVICE ROUTINE
+;------------------------------------------------------------------------------
+
+INT_VECT  CODE    0x0004            ; interrupt vector location
+
+;         Context saving for ISR
+          MOVWF   W_TEMP            ; save off current W register contents
+          MOVF    STATUS,W          ; move status register into W register
+          MOVWF   STATUS_TEMP       ; save off contents of STATUS register
+          MOVF    PCLATH,W          ; move pclath register into W register
+          MOVWF   PCLATH_TEMP       ; save off contents of PCLATH register
+
+;------------------------------------------------------------------------------
+; USER INTERRUPT SERVICE ROUTINE GOES HERE
+;------------------------------------------------------------------------------
+
+;         Restore context before returning from interrupt
+          MOVF    PCLATH_TEMP,W     ; retrieve copy of PCLATH register
+          MOVWF   PCLATH            ; restore pre-isr PCLATH register contents
+          MOVF    STATUS_TEMP,W     ; retrieve copy of STATUS register
+          MOVWF   STATUS            ; restore pre-isr STATUS register contents
+          SWAPF   W_TEMP,F
+          SWAPF   W_TEMP,W          ; restore pre-isr W register contents
+          RETFIE                    ; return from interrupt
+
+;------------------------------------------------------------------------------
+; MAIN PROGRAM
+;------------------------------------------------------------------------------
+
+PROGRAM   CODE    
+
+START
+
+; Internal clock set to 8 MHz
+     banksel OSCCON 
+     bsf    OSCCON, IRCF2
+     bsf    OSCCON, IRCF1
+     bsf    OSCCON, IRCF0
+     bcf    OSCCON,SCS0
+     bcf    OSCCON,SCS1
+ ; allow some time for oscillator to settle
+     nop
+     nop
+     nop
+     nop
+     nop
+;------------------------------------------------------------------------------
+; PLACE USER PROGRAM HERE
+;------------------------------------------------------------------------------
+
+		clrf STATUS ; this also sets bank 0
+
+; ---------------- 
+; INITIALIZE PORTS 
+; ---------------- 
+		banksel PORTA
+		movlw b'00000000'       ; set up portA 
+		movwf PORTA
+
+		movlw b'00100000'       ; RB5(TX)=1 others are 0
+		movwf PORTB
+
+		banksel TRISA        	; Bank 1
+
+		movlw 0xFF 
+		movwf TRISA             ; portA all pins input
+
+		movlw b'11011111'       ; RB2 (RX)=input,  RB5 (TX)=output 
+		movwf TRISB
+
+
+; ------------------------------------ 
+; SET BAUD RATE TO COMMUNICATE WITH PC 
+; ------------------------------------ 
+
+		;BSF STATUS,RP0 ; Go to Bank1
+		MOVLW 0x33 ; Set Baud rate
+		MOVWF SPBRG
+
+		MOVLW b'00100000' ; 8-bit transmit, transmitter enabled,
+		MOVWF TXSTA ; asynchronous mode, high speed mode
+		BSF PIE1,TXIE ; Enable transmit interrupts
+		BSF PIE1,RCIE ; Enable receive interrupts
+		BCF STATUS,RP0 ; Go to Bank 0
+		MOVLW b'10100000' ; 8-bit receive, receiver enabled,
+		MOVWF RCSTA ; serial port enabled
+
+; ------------------------------------ 
+; PROVIDE A SETTLING TIME FOR START UP 
+; ------------------------------------ 
+
+        clrf dataL 
+settle  decfsz dataL,F 
+
+ 
+; --------- 
+; MAIN LOOP 
+; --------- 
+
+        call message            ; send "16F628 alive" 
+
+
+; ------------------------------------------------------------- 
+; SEND CHARACTER IN W VIA RS232 AND WAIT UNTIL FINISHED SENDING 
+; ------------------------------------------------------------- 
+
+send    movwf TXREG             ; send data in W
+
+		banksel TXSTA			;enable trnanision
+		BSF TXSTA,5
+
+TransWt bcf STATUS,RP0          ; BANK 0  
+WtHere  btfss PIR1,TXIF        ; (1) transmission is complete if hi 
+        goto WtHere
+
+        ;bcf STATUS,RP0          ; BANK 0 
+        return 
+
+; ------- 
+; MESSAGE 
+; ------- 
+
+message movlw  '1' 
+        call send 
+        movlw  '6' 
+        call send 
+        movlw  'F' 
+        call send 
+        movlw  '8' 
+        call send 
+        movlw  '8' 
+        call send 
+        movlw  ' ' 
+        call send 
+        movlw  'a' 
+        call send 
+        movlw  'l' 
+        call send 
+        movlw  'i' 
+        call send 
+        movlw  'v' 
+        call send 
+        movlw  'e' 
+        call send 
+        movlw  0x0D ; CR 
+        call send 
+        movlw  0x0A ; LF 
+        call send 
+        return
+
+        END 
+
+
